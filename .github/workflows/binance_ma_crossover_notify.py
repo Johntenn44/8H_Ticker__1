@@ -32,7 +32,7 @@ COINS = [
 ]
 
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '12h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
+INTERVAL = '4h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
 LOOKBACK = 210       # Number of candles to fetch (must be >= 200)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
