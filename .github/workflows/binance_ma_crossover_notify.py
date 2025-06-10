@@ -32,7 +32,7 @@ COINS = [
 ]
 
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '6h'      # Use 4-hour candles
+INTERVAL = '6h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
 LOOKBACK = 210       # Number of candles to fetch (must be >= 200)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -53,9 +53,9 @@ def add_indicators(df):
 
 def analyze_trend(df):
     results = {}
-    # Use last two 4h closes for trend analysis
-    cp1 = df['close'].iloc[-1]   # Most recent 4h close
-    cp2 = df['close'].iloc[-2]   # Previous 4h close
+    # Use last two closes for trend analysis
+    cp1 = df['close'].iloc[-1]   # Most recent close
+    cp2 = df['close'].iloc[-2]   # Previous close
 
     A1 = df['EMA8'].iloc[-1]
     B1 = df['EMA13'].iloc[-1]
@@ -80,9 +80,6 @@ def analyze_trend(df):
     elif (E1 < cp1 < A1 < B1 < C1 < D1 < MA50_1) and (cp1 > MA200_1) and \
          (E2 < cp2 < A2 < B2 < C2 < D2 < MA50_2) and (cp2 > MA200_2):
         results['start'] = 'downtrend'
-
-    # --- Continue/Warning/End logic can be similarly adapted as needed ---
-    # For brevity, this example only checks for start conditions
 
     results['values'] = {
         'cp1': cp1, 'cp2': cp2, 'EMA8': A1, 'EMA13': B1, 'EMA21': C1,
@@ -133,7 +130,7 @@ def main():
             if 'start' in trend:
                 vals = trend['values']
                 msg = (
-                    f"<b>Kucoin 4H Trend Alert ({dt})</b>\n"
+                    f"<b>Kucoin {INTERVAL.upper()} Trend Alert ({dt})</b>\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
                     f"Start: <b>{trend['start']}</b>\n"
                     f"\n<code>cp1={vals['cp1']:.5f}, cp2={vals['cp2']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
@@ -148,7 +145,8 @@ def main():
         for msg in messages:
             send_telegram_message(msg)
     else:
-        print("No trend signals for any coin.")
+        # Send "No trend signals for any coin" if there are no signals
+        send_telegram_message("No trend signals for any coin.")
 
 if __name__ == "__main__":
     main()
