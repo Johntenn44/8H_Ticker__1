@@ -23,7 +23,6 @@ COINS = [
     "CAKE/USDT",
     "GRASS/USDT",
     "AAVE/USDT",
-    "XMR/USDT",
     "SUI/USDT",
     "ARB/USDT",
     "XLM/USDT",
