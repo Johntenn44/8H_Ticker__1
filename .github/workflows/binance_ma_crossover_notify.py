@@ -28,12 +28,11 @@ COINS = [
     "MNT/USDT",
     "LTC/USDT",
     "NEAR/USDT",
-    # Add more symbols here
 ]
 
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '4h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
-LOOKBACK = 210       # Number of candles to fetch (must be >= 200)
+INTERVAL = '4h'      # e.g., '4h' or '6h'
+LOOKBACK = 210       # Must be >= 200
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -53,9 +52,8 @@ def add_indicators(df):
 
 def analyze_trend(df):
     results = {}
-    # Use last two closes for trend analysis
-    cp1 = df['close'].iloc[-1]   # Most recent close
-    cp2 = df['close'].iloc[-2]   # Previous close
+    cp1 = df['close'].iloc[-1]
+    cp2 = df['close'].iloc[-2]
 
     A1 = df['EMA8'].iloc[-1]
     B1 = df['EMA13'].iloc[-1]
@@ -73,7 +71,6 @@ def analyze_trend(df):
     MA50_2 = df['MA50'].iloc[-2]
     MA200_2 = df['MA200'].iloc[-2]
 
-    # --- Start Conditions: both last closes must meet the trend condition ---
     if (E1 > cp1 > A1 > B1 > C1 > D1 > MA50_1) and (cp1 < MA200_1) and \
        (E2 > cp2 > A2 > B2 > C2 > D2 > MA50_2) and (cp2 < MA200_2):
         results['start'] = 'uptrend'
@@ -82,8 +79,15 @@ def analyze_trend(df):
         results['start'] = 'downtrend'
 
     results['values'] = {
-        'cp1': cp1, 'cp2': cp2, 'EMA8': A1, 'EMA13': B1, 'EMA21': C1,
-        'EMA50': D1, 'EMA200': E1, 'MA50': MA50_1, 'MA200': MA200_1
+        'cp1': cp1,
+        'cp2': cp2,
+        'EMA8': A1,
+        'EMA13': B1,
+        'EMA21': C1,
+        'EMA50': D1,
+        'EMA200': E1,
+        'MA50': MA50_1,
+        'MA200': MA200_1
     }
     return results
 
@@ -92,18 +96,35 @@ def analyze_trend(df):
 def fetch_ohlcv_ccxt(symbol, timeframe, limit):
     exchange = getattr(ccxt, EXCHANGE_ID)()
     exchange.load_markets()
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(
-        ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-    )
+    ohlcv = exchange.fetch_ohlcv(symbol.replace('/', '-'), timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     df['close'] = df['close'].astype(float)
     return df
 
+# --- CHECK TREND IN PAST N PERIODS ---
+
+def check_trend_in_past_n_periods(df, n=10):
+    """
+    Check if there was any trend (uptrend/downtrend) in the past n periods.
+    Returns the first found trend type ('uptrend' or 'downtrend'), or None if no trend found.
+    """
+    for i in range(len(df) - n, len(df)):
+        if i < 2:
+            continue
+        window_df = df.iloc[:i+1]
+        trend = analyze_trend(window_df)
+        if 'start' in trend:
+            return trend['start']
+    return None
+
 # --- TELEGRAM NOTIFICATION ---
 
 def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram bot token or chat ID not set in environment variables.")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -111,9 +132,12 @@ def send_telegram_message(message):
         "parse_mode": "HTML"
     }
     resp = requests.post(url, data=payload)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
 
-# --- MAIN LOGIC ---
+# --- MAIN ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
@@ -126,16 +150,16 @@ def main():
                 continue
             df = add_indicators(df)
             trend = analyze_trend(df)
-            # Format message if any condition is met
             if 'start' in trend:
+                past_trend = check_trend_in_past_n_periods(df, n=10)
                 vals = trend['values']
+                past_trend_text = past_trend if past_trend else "None"
                 msg = (
                     f"<b>Kucoin {INTERVAL.upper()} Trend Alert ({dt})</b>\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
-                    f"Start: <b>{trend['start']}</b>\n"
-                    f"\n<code>cp1={vals['cp1']:.5f}, cp2={vals['cp2']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
-                    f"EMA21={vals['EMA21']:.5f}, EMA50={vals['EMA50']:.5f}, EMA200={vals['EMA200']:.5f}, "
-                    f"MA50={vals['MA50']:.5f}, MA200={vals['MA200']:.5f}</code>"
+                    f"Current Trend: <b>{trend['start']}</b>\n"
+                    f"Trend in past 10 periods: <b>{past_trend_text}</b>\n"
+                    f"\n<code>cp1={vals['cp1']:.5f}, cp2={vals['cp2']:.5f}</code>"
                 )
                 messages.append(msg)
         except Exception as e:
@@ -145,7 +169,6 @@ def main():
         for msg in messages:
             send_telegram_message(msg)
     else:
-        # Send "No trend signals for any coin" if there are no signals
         send_telegram_message("No trend signals for any coin.")
 
 if __name__ == "__main__":
