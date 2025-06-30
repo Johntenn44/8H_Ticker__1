@@ -3,7 +3,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 
@@ -16,7 +16,7 @@ COINS = [
 
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
-LOOKBACK = 210       # Number of candles to fetch (>= 200)
+LOOKBACK = 500        # Fetch enough data for indicator calculation and 10 days backtest
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -43,18 +43,6 @@ def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=
     d = k.rolling(window=smooth_d).mean()
     return k, d
 
-# --- TREND LOGIC ---
-
-def analyze_stoch_rsi_trend(k, d):
-    # Detect %K crossing above %D for Uptrend (with %K < 80)
-    # Detect %K crossing below %D for Downtrend (with %K > 20)
-    if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
-        return "Uptrend"
-    elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
-        return "Downtrend"
-    else:
-        return "No clear Stoch RSI trend"
-
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_ccxt(symbol, timeframe, limit):
@@ -68,6 +56,57 @@ def fetch_ohlcv_ccxt(symbol, timeframe, limit):
     df.set_index('timestamp', inplace=True)
     df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
     return df
+
+# --- BACKTEST LOGIC ---
+
+def backtest_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3):
+    k, d = calculate_stoch_rsi(df, rsi_length, stoch_length, smooth_k, smooth_d)
+
+    position = 0  # 0 = no position, 1 = long
+    entry_price = 0.0
+    returns = []
+
+    # We'll backtest only on last 10 days of data (filtered by timestamp)
+    # 10 days * 2 candles per day (12h interval) = 20 candles approx
+    backtest_start = df.index[-1] - timedelta(days=10)
+    df_bt = df.loc[df.index >= backtest_start]
+
+    k_bt = k.loc[df_bt.index]
+    d_bt = d.loc[df_bt.index]
+
+    for i in range(1, len(df_bt)):
+        # Skip if any NaN in indicators
+        if pd.isna(k_bt.iloc[i-1]) or pd.isna(d_bt.iloc[i-1]) or pd.isna(k_bt.iloc[i]) or pd.isna(d_bt.iloc[i]):
+            returns.append(0)
+            continue
+
+        # Entry condition: %K crosses above %D and %K < 80
+        if position == 0 and k_bt.iloc[i-1] < d_bt.iloc[i-1] and k_bt.iloc[i] > d_bt.iloc[i] and k_bt.iloc[i] < 80:
+            position = 1
+            entry_price = df_bt['close'].iloc[i]
+            returns.append(0)  # no return on entry candle
+
+        # Exit condition: %K crosses below %D and %K > 20
+        elif position == 1 and k_bt.iloc[i-1] > d_bt.iloc[i-1] and k_bt.iloc[i] < d_bt.iloc[i] and k_bt.iloc[i] > 20:
+            exit_price = df_bt['close'].iloc[i]
+            ret = (exit_price - entry_price) / entry_price
+            returns.append(ret)
+            position = 0
+            entry_price = 0.0
+
+        else:
+            returns.append(0)  # no trade or holding position without exit
+
+    # If still holding position at end, close at last price
+    if position == 1:
+        exit_price = df_bt['close'].iloc[-1]
+        ret = (exit_price - entry_price) / entry_price
+        returns[-1] += ret  # add return to last candle
+
+    # Calculate cumulative return
+    cumulative_return = np.prod([1 + r for r in returns]) - 1
+
+    return cumulative_return, returns, df_bt.index[1:]  # returns aligned with index from second candle
 
 # --- TELEGRAM NOTIFICATION ---
 
@@ -85,33 +124,31 @@ def send_telegram_message(message):
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-    coins_with_trends = {}
+    results = {}
 
     for symbol in COINS:
         try:
             df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
-            if len(df) < max(13, 8, 5, 3):
+            if len(df) < LOOKBACK:
                 print(f"Not enough data for {symbol}")
                 continue
 
-            k, d = calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3)
-            trend = analyze_stoch_rsi_trend(k, d)
-
-            if trend != "No clear Stoch RSI trend":
-                coins_with_trends[symbol] = trend
+            cum_ret, returns, timestamps = backtest_stoch_rsi(df)
+            results[symbol] = cum_ret
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    if coins_with_trends:
-        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI Alert ({dt})</b>",
-                     "Coins with Stochastic RSI trends:\n"]
-        for coin, trend in coins_with_trends.items():
-            msg_lines.append(f"{coin} - Trend: {trend}")
+    # Prepare message with backtest results
+    if results:
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI 10-Day Backtest ({dt})</b>",
+                     "Cumulative returns from backtest:\n"]
+        for coin, ret in sorted(results.items(), key=lambda x: x[1], reverse=True):
+            msg_lines.append(f"{coin}: {ret*100:.2f}%")
         msg = "\n".join(msg_lines)
         send_telegram_message(msg)
     else:
-        send_telegram_message("No coins satisfy the Stochastic RSI trend conditions at this time.")
+        send_telegram_message("No backtest results available for the selected coins.")
 
 if __name__ == "__main__":
     main()
