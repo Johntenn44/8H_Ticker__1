@@ -48,10 +48,10 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
 # --- TREND LOGIC ---
 
 def analyze_trend(df):
-    cp = df['Close'].iloc[-1]
-    ma50 = df['MA50'].iloc[-1]
-    ema200 = df['EMA200'].iloc[-1]
-    ma200 = df['MA200'].iloc[-1]
+    cp = float(df['Close'].iloc[-1])
+    ma50 = float(df['MA50'].iloc[-1])
+    ema200 = float(df['EMA200'].iloc[-1])
+    ma200 = float(df['MA200'].iloc[-1])
 
     low = min(ma50, ema200, ma200)
     high = max(ma50, ema200, ma200)
@@ -85,10 +85,9 @@ def analyze_kdj_trend(k, d, j):
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_yfinance(symbol, interval, lookback):
-    # Calculate number of days to cover lookback candles at 15m interval
     minutes_per_candle = 15
     total_minutes = lookback * minutes_per_candle
-    days = max(1, math.ceil(total_minutes / (60 * 24)))  # at least 1 day
+    days = max(1, math.ceil(total_minutes / (60 * 24)))
 
     period_str = f"{days}d"
 
@@ -97,15 +96,13 @@ def fetch_ohlcv_yfinance(symbol, interval, lookback):
         period=period_str,
         interval=interval,
         progress=False,
-        auto_adjust=False  # set True if you want adjusted prices
+        auto_adjust=False
     )
 
     if df.empty:
         raise ValueError(f"No data fetched for {symbol} with interval {interval}")
 
-    # Keep only last LOOKBACK candles
     df = df.tail(lookback)
-
     return df
 
 # --- TELEGRAM NOTIFICATION ---
@@ -132,7 +129,12 @@ def main():
 
         df = add_indicators(df)
         trend = analyze_trend(df)
-        if not trend.get('price_between_mas'):
+
+        price_between_mas = trend.get('price_between_mas')
+        if not isinstance(price_between_mas, bool):
+            price_between_mas = bool(price_between_mas)
+
+        if not price_between_mas:
             print("Price not between MAs, skipping alert.")
             return
 
@@ -147,8 +149,9 @@ def main():
         rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
 
         k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+        k_last, d_last, j_last = k.iloc[-1], d.iloc[-1], j.iloc[-1]
 
-        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
+        if np.isclose(k_last, d_last) and np.isclose(d_last, j_last):
             print("KDJ values too close, skipping alert.")
             return
 
