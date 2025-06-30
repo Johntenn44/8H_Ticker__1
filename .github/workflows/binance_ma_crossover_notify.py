@@ -10,7 +10,7 @@ from datetime import datetime
 COINS = ["USDT/EUR"]     # KuCoin symbol for USDT/EUR
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '15m'
-LOOKBACK = 210           # To have enough data for 200 EMA
+LOOKBACK = 210           # 210 candles * 15m = 52.5 hours (~2.19 days)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -102,7 +102,7 @@ def fetch_ohlcv_and_convert(symbol, timeframe, limit):
     df['low'] = 1 / df['high']
     df['close'] = 1 / df['close']
 
-    # Convert volume approx to EUR
+    # Convert volume approx to EUR (base currency of EUR/USDT)
     df['volume'] = df['volume'] * df['close']
 
     return df
