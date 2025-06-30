@@ -8,20 +8,37 @@ from datetime import datetime
 # --- CONFIGURATION ---
 
 COINS = [
-    "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT",
-    "EIGEN/USDT", "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT",
-    "DOGE/USDT", "CAKE/USDT", "GRASS/USDT", "AAVE/USDT", "SUI/USDT",
-    "ARB/USDT", "XLM/USDT", "MNT/USDT", "LTC/USDT", "NEAR/USDT",
+    "XRP/USDT",
+    "XMR/USDT",
+    "GMX/USDT",
+    "LUNA/USDT",
+    "TRX/USDT",
+    "EIGEN/USDT",
+    "APE/USDT",
+    "WAVES/USDT",
+    "PLUME/USDT",
+    "SUSHI/USDT",
+    "DOGE/USDT",
+    "VIRTUAL/USDT",
+    "CAKE/USDT",
+    "GRASS/USDT",
+    "AAVE/USDT",
+    "SUI/USDT",
+    "ARB/USDT",
+    "XLM/USDT",
+    "MNT/USDT",
+    "LTC/USDT",
+    "NEAR/USDT",
 ]
 
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
-LOOKBACK = 210       # Number of candles to fetch (>= 200)
+LOOKBACK = 210       # Number of candles to fetch (>= 50 for smoothing)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- INDICATOR CALCULATIONS ---
+# --- INDICATOR CALCULATION ---
 
 def calculate_rsi(series, period):
     delta = series.diff()
@@ -29,40 +46,48 @@ def calculate_rsi(series, period):
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)  # avoid division by zero
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_stochastic_rsi(df, rsi_length=13, stock_length=8, smooth_k=5, smooth_d=3):
-    rsi = calculate_rsi(df['close'], rsi_length)
-    min_rsi = rsi.rolling(window=stock_length, min_periods=1).min()
-    max_rsi = rsi.rolling(window=stock_length, min_periods=1).max()
-    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi + 1e-8)  # epsilon to avoid div by zero
-    k = stoch_rsi.rolling(window=smooth_k, min_periods=1).mean()
-    d = k.rolling(window=smooth_d, min_periods=1).mean()
-    return k, d
-
-def add_indicators(df):
-    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    df['MA50'] = df['close'].rolling(window=50, min_periods=50).mean()
-    df['MA200'] = df['close'].rolling(window=200, min_periods=200).mean()
+def add_ema(df):
+    df['EMA8'] = df['close'].ewm(span=8, adjust=False).mean()
+    df['EMA13'] = df['close'].ewm(span=13, adjust=False).mean()
     return df
+
+def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, k_smooth=5, d_smooth=3):
+    rsi = calculate_rsi(df['close'], rsi_length)
+    min_rsi = rsi.rolling(window=stoch_length).min()
+    max_rsi = rsi.rolling(window=stoch_length).max()
+    stoch_rsi_raw = (rsi - min_rsi) / (max_rsi - min_rsi)
+    stoch_rsi_k = stoch_rsi_raw.rolling(window=k_smooth).mean()
+    stoch_rsi_d = stoch_rsi_k.rolling(window=d_smooth).mean()
+    return stoch_rsi_k, stoch_rsi_d
 
 # --- TREND LOGIC ---
 
 def analyze_trend(df):
-    cp = df['close'].iloc[-1]
-    ma50 = df['MA50'].iloc[-1]
-    ema200 = df['EMA200'].iloc[-1]
-    ma200 = df['MA200'].iloc[-1]
-    low = min(ma50, ema200, ma200)
-    high = max(ma50, ema200, ma200)
-    return low <= cp <= high
+    ema8 = df['EMA8'].iloc[-1]
+    ema13 = df['EMA13'].iloc[-1]
+    price = df['close'].iloc[-1]
+
+    # Example trend logic: EMA8 above EMA13 means uptrend
+    ema_trend_up = ema8 > ema13
+
+    # Price between EMA8 and EMA13 (optional filter)
+    low = min(ema8, ema13)
+    high = max(ema8, ema13)
+    price_between_emas = low <= price <= high
+
+    return {
+        "ema_trend_up": ema_trend_up,
+        "price_between_emas": price_between_emas
+    }
 
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_ccxt(symbol, timeframe, limit):
-    exchange = getattr(ccxt, EXCHANGE_ID)({'enableRateLimit': True})
+    exchange = getattr(ccxt, EXCHANGE_ID)()
     exchange.load_markets()
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(
@@ -76,51 +101,75 @@ def fetch_ohlcv_ccxt(symbol, timeframe, limit):
 # --- TELEGRAM NOTIFICATION ---
 
 def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram bot token or chat ID not set. Skipping Telegram message.")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
-    resp = requests.post(url, data=payload)
-    resp.raise_for_status()
+    try:
+        resp = requests.post(url, data=payload)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
 
 # --- MAIN LOGIC ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
     coins_meeting_all = []
+    trend_indications = {}
 
     for symbol in COINS:
         try:
             df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
-            if len(df) < 200:
+            if len(df) < 50:
                 print(f"Not enough data for {symbol}")
                 continue
 
-            df = add_indicators(df)
+            df = add_ema(df)
+            stoch_k, stoch_d = calculate_stoch_rsi(df)
 
-            if not analyze_trend(df):
+            # Get latest values
+            ema8 = df['EMA8'].iloc[-1]
+            ema13 = df['EMA13'].iloc[-1]
+            k_last = stoch_k.iloc[-1]
+            d_last = stoch_d.iloc[-1]
+            price = df['close'].iloc[-1]
+
+            # Skip if any NaN due to rolling windows
+            if np.isnan(k_last) or np.isnan(d_last) or np.isnan(ema8) or np.isnan(ema13):
+                print(f"NaN values encountered for {symbol}, skipping")
                 continue
 
-            k, d = calculate_stochastic_rsi(df, rsi_length=13, stock_length=8, smooth_k=5, smooth_d=3)
-            k_last, d_last = k.iloc[-1], d.iloc[-1]
-            k_prev, d_prev = k.iloc[-2], d.iloc[-2]
+            trend = analyze_trend(df)
 
-            # Signal: price between MAs AND Stoch RSI K crosses above D AND K is below 20 (oversold)
-            if k_prev < d_prev and k_last > d_last and k_last < 20:
+            # Define conditions:
+            # 1) EMA trend up (EMA8 > EMA13)
+            # 2) Stoch RSI oversold: %K and %D below 0.2 (buy signal)
+            # 3) Price between EMA8 and EMA13 (optional)
+            if trend['ema_trend_up'] and k_last < 0.2 and d_last < 0.2 and trend['price_between_emas']:
                 coins_meeting_all.append(symbol)
+                trend_indications[symbol] = "EMA Uptrend + Stoch RSI Oversold"
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
     if coins_meeting_all:
-        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Alert ({dt})</b>",
-                     "Coins with price between MAs and StochRSI K crossing above D (oversold):\n"]
-        msg_lines.extend(coins_meeting_all)
-        send_telegram_message("\n".join(msg_lines))
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} EMA + Stoch RSI Alert ({dt})</b>",
+                     "Coins satisfying EMA(8>13) and Stoch RSI oversold conditions:\n"]
+        for coin in coins_meeting_all:
+            msg_lines.append(f"{coin} - {trend_indications.get(coin, 'N/A')}")
+        msg = "\n".join(msg_lines)
+        print(msg)  # Print to console
+        send_telegram_message(msg)
     else:
-        send_telegram_message("No coins satisfy conditions at this time.")
+        no_signal_msg = f"No coins satisfy EMA + Stoch RSI conditions at {dt}."
+        print(no_signal_msg)
+        send_telegram_message(no_signal_msg)
 
 if __name__ == "__main__":
     main()
