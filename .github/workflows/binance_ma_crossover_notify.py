@@ -18,8 +18,11 @@ EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
 LOOKBACK = 210       # Number of candles for indicator calculation
 
-# For backtest: 7 days = 14 candles (12h), plus LOOKBACK for indicators
-BACKTEST_CANDLES = LOOKBACK + 14
+BACKTEST_DAYS = 30
+CANDLES_PER_DAY = 2  # 12h candles per day
+
+# Total candles needed for backtest = LOOKBACK + 30 days * 2 candles/day
+BACKTEST_CANDLES = LOOKBACK + (BACKTEST_DAYS * CANDLES_PER_DAY)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -187,7 +190,7 @@ def main():
 
     # Prepare Telegram message
     if coins_results:
-        msg_lines = [f"<b>KuCoin {INTERVAL.upper()} 7-Day Backtest ({dt})</b>", ""]
+        msg_lines = [f"<b>KuCoin {INTERVAL.upper()} 30-Day Backtest ({dt})</b>", ""]
         for coin, res in coins_results.items():
             cum_ret_pct = res['cumulative_return'] * 100
             msg_lines.append(f"{coin}: Cumulative Return: {cum_ret_pct:.2f}%")
