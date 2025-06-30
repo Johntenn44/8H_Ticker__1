@@ -107,8 +107,8 @@ def main():
             k_last, d_last = k.iloc[-1], d.iloc[-1]
             k_prev, d_prev = k.iloc[-2], d.iloc[-2]
 
-            # Signal: price between MAs AND Stoch RSI K crosses above D
-            if k_prev < d_prev and k_last > d_last:
+            # Signal: price between MAs AND Stoch RSI K crosses above D AND K is below 20 (oversold)
+            if k_prev < d_prev and k_last > d_last and k_last < 20:
                 coins_meeting_all.append(symbol)
 
         except Exception as e:
@@ -116,7 +116,7 @@ def main():
 
     if coins_meeting_all:
         msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Alert ({dt})</b>",
-                     "Coins with price between MAs and StochRSI K crossing above D:\n"]
+                     "Coins with price between MAs and StochRSI K crossing above D (oversold):\n"]
         msg_lines.extend(coins_meeting_all)
         send_telegram_message("\n".join(msg_lines))
     else:
