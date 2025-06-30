@@ -3,7 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
+import math
 
 # --- CONFIGURATION ---
 
@@ -84,17 +85,19 @@ def analyze_kdj_trend(k, d, j):
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_yfinance(symbol, interval, lookback):
-    # Calculate start datetime to get enough data
-    end_date = datetime.utcnow()
+    # For intervals < 1d, yfinance requires 'period' parameter, not start/end
+    # Calculate period in days to cover enough data
     total_minutes = lookback * 15  # 15 minutes per candle
-    start_date = end_date - timedelta(minutes=total_minutes)
+    days = max(1, math.ceil(total_minutes / (60 * 24)))  # at least 1 day
+
+    period_str = f"{days}d"
 
     df = yf.download(
         symbol,
-        start=start_date.strftime('%Y-%m-%d %H:%M:%S'),
-        end=end_date.strftime('%Y-%m-%d %H:%M:%S'),
+        period=period_str,
         interval=interval,
-        progress=False
+        progress=False,
+        auto_adjust=False  # Set True if you want adjusted prices
     )
 
     if df.empty:
