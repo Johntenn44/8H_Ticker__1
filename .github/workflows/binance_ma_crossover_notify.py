@@ -1,16 +1,16 @@
 import os
-import yfinance as yf
+import ccxt
 import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime
-import math
 
 # --- CONFIGURATION ---
 
-SYMBOL = "EURUSD=X"  # Yahoo Finance ticker for EUR/USD
-INTERVAL = '15m'     # 15-minute candles
-LOOKBACK = 210       # Number of candles to fetch (~52.5 hours)
+COINS = ["EURUSDT"]      # Binance uses no slash for symbols
+EXCHANGE_ID = 'binance'  # Change to 'kraken' if you prefer Kraken
+INTERVAL = '15m'         # 15-minute candles
+LOOKBACK = 210           # Number of candles to fetch (>= 200)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -21,9 +21,9 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 # --- INDICATOR CALCULATION ---
 
 def add_indicators(df):
-    df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-    df['MA50'] = df['Close'].rolling(window=50).mean()
-    df['MA200'] = df['Close'].rolling(window=200).mean()
+    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
+    df['MA50'] = df['close'].rolling(window=50).mean()
+    df['MA200'] = df['close'].rolling(window=200).mean()
     return df
 
 def calculate_rsi(series, period):
@@ -37,62 +37,28 @@ def calculate_rsi(series, period):
     return rsi
 
 def calculate_kdj(df, length=5, ma1=8, ma2=8):
-    low_min = df['Low'].rolling(window=length, min_periods=1).min()
-    high_max = df['High'].rolling(window=length, min_periods=1).max()
-    rsv = (df['Close'] - low_min) / (high_max - low_min) * 100
+    low_min = df['low'].rolling(window=length, min_periods=1).min()
+    high_max = df['high'].rolling(window=length, min_periods=1).max()
+    rsv = (df['close'] - low_min) / (high_max - low_min) * 100
     k = rsv.ewm(span=ma1, adjust=False).mean()
     d = k.ewm(span=ma2, adjust=False).mean()
     j = 3 * k - 2 * d
     return k, d, j
 
-# --- DATA FETCHING ---
-
-def fetch_ohlcv_yfinance(symbol, interval, lookback):
-    # Calculate days to cover lookback candles at 15m interval
-    minutes_per_candle = 15
-    total_minutes = lookback * minutes_per_candle
-    days = max(1, math.ceil(total_minutes / (60 * 24)))
-
-    period_str = f"{days}d"
-
-    df = yf.download(
-        symbol,
-        period=period_str,
-        interval=interval,
-        progress=False,
-        auto_adjust=False
-    )
-
-    if df.empty:
-        raise ValueError(f"No data fetched for {symbol} with interval {interval}")
-
-    df = df.tail(lookback)
-    return df
-
-# --- TELEGRAM NOTIFICATION ---
-
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    resp = requests.post(url, data=payload)
-    resp.raise_for_status()
-
 # --- TREND LOGIC ---
 
 def analyze_trend(df):
-    cp = float(df['Close'].iloc[-1])
-    ma50 = float(df['MA50'].iloc[-1])
-    ema200 = float(df['EMA200'].iloc[-1])
-    ma200 = float(df['MA200'].iloc[-1])
+    cp = df['close'].iloc[-1]
+    ma50 = df['MA50'].iloc[-1]
+    ema200 = df['EMA200'].iloc[-1]
+    ma200 = df['MA200'].iloc[-1]
 
     low = min(ma50, ema200, ma200)
     high = max(ma50, ema200, ma200)
 
-    return low <= cp <= high
+    results = {}
+    results['price_between_mas'] = low <= cp <= high
+    return results
 
 def analyze_rsi_trend(rsi8, rsi13, rsi21):
     if rsi8 > rsi13 > rsi21:
@@ -116,51 +82,95 @@ def analyze_kdj_trend(k, d, j):
     else:
         return "No clear KDJ trend"
 
+# --- DATA FETCHING ---
+
+def fetch_ohlcv_ccxt(symbol, timeframe, limit):
+    exchange_class = getattr(ccxt, EXCHANGE_ID)
+    exchange = exchange_class()
+    exchange.load_markets()
+
+    # Check if symbol exists on exchange
+    if symbol not in exchange.symbols:
+        raise ValueError(f"Symbol {symbol} not available on {EXCHANGE_ID}")
+
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df.astype(float)
+    return df
+
+# --- TELEGRAM NOTIFICATION ---
+
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    resp = requests.post(url, data=payload)
+    resp.raise_for_status()
+
 # --- MAIN LOGIC ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-    try:
-        df = fetch_ohlcv_yfinance(SYMBOL, INTERVAL, LOOKBACK)
-        if len(df) < 200:
-            print(f"Not enough data for {SYMBOL}")
-            return
+    coins_meeting_all = []
+    trend_indications = {}
 
-        df = add_indicators(df)
-        if not analyze_trend(df):
-            print("Price not between MAs, skipping alert.")
-            return
+    for symbol in COINS:
+        try:
+            df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
+            if len(df) < 200:
+                print(f"Not enough data for {symbol}")
+                continue
 
-        rsi8 = calculate_rsi(df['Close'], 8).iloc[-1]
-        rsi13 = calculate_rsi(df['Close'], 13).iloc[-1]
-        rsi21 = calculate_rsi(df['Close'], 21).iloc[-1]
+            df = add_indicators(df)
+            trend = analyze_trend(df)
+            if not trend.get('price_between_mas'):
+                print(f"Price not between MAs for {symbol}, skipping.")
+                continue
 
-        if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
-            print("RSI values too close, skipping alert.")
-            return
+            rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
+            rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
+            rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
 
-        rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
+            if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
+                print(f"RSI values too close for {symbol}, skipping.")
+                continue
 
-        k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+            rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
 
-        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
-            print("KDJ values too close, skipping alert.")
-            return
+            k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
 
-        kdj_trend = analyze_kdj_trend(k, d, j)
+            if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
+                print(f"KDJ values too close for {symbol}, skipping.")
+                continue
 
-        if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
-            print("No clear trend detected, skipping alert.")
-            return
+            kdj_trend = analyze_kdj_trend(k, d, j)
 
-        msg = (f"<b>Yahoo Finance {INTERVAL.upper()} Combined RSI & KDJ Alert ({dt})</b>\n"
-               f"{SYMBOL} - RSI: {rsi_trend} | KDJ: {kdj_trend}")
+            if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
+                print(f"No clear trend for {symbol}, skipping.")
+                continue
 
+            coins_meeting_all.append(symbol)
+            trend_indications[symbol] = f"RSI: {rsi_trend} | KDJ: {kdj_trend}"
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+
+    if coins_meeting_all:
+        msg_lines = [f"<b>{EXCHANGE_ID.capitalize()} {INTERVAL.upper()} Combined RSI & KDJ Alert ({dt})</b>",
+                     "Coins satisfying conditions:\n"]
+        for coin in coins_meeting_all:
+            msg_lines.append(f"{coin} - {trend_indications.get(coin, 'N/A')}")
+        msg = "\n".join(msg_lines)
         send_telegram_message(msg)
-        print("Alert sent:", msg)
-
-    except Exception as e:
-        print(f"Error: {e}")
+        print("Alert sent.")
+    else:
+        send_telegram_message(f"No coins satisfy the RSI and KDJ trend conditions at this time ({dt}).")
+        print("No coins met conditions.")
 
 if __name__ == "__main__":
     main()
