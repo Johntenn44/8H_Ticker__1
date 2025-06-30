@@ -10,7 +10,7 @@ from datetime import datetime
 COINS = ["USDT/EUR"]     # KuCoin symbol for USDT/EUR
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '15m'
-LOOKBACK = 210
+LOOKBACK = 210           # To have enough data for 200 EMA
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -97,15 +97,12 @@ def fetch_ohlcv_and_convert(symbol, timeframe, limit):
     df = df.astype(float)
 
     # Convert USDT/EUR to EUR/USDT by taking reciprocal of prices
-    # Prices: open, high, low, close
     df['open'] = 1 / df['open']
-    df['high'] = 1 / df['low']    # high becomes reciprocal of low
-    df['low'] = 1 / df['high']   # low becomes reciprocal of high
+    df['high'] = 1 / df['low']
+    df['low'] = 1 / df['high']
     df['close'] = 1 / df['close']
 
-    # Volume conversion:
-    # Volume is in base currency (USDT). For EUR/USDT, volume should be in EUR.
-    # Approximate volume in EUR = volume_in_USDT * price_in_EUR/USDT (close price)
+    # Convert volume approx to EUR
     df['volume'] = df['volume'] * df['close']
 
     return df
@@ -122,6 +119,43 @@ def send_telegram_message(message):
     resp = requests.post(url, data=payload)
     resp.raise_for_status()
 
+# --- BACKTEST FUNCTION ---
+
+def backtest(df):
+    signals = []
+    # Start at 200 to have enough data for indicators
+    for i in range(200, len(df)):
+        window = df.iloc[:i+1].copy()
+        window = add_indicators(window)
+
+        trend = analyze_trend(window)
+        if not trend.get('price_between_mas'):
+            continue
+
+        rsi8 = calculate_rsi(window['close'], 8).iloc[-1]
+        rsi13 = calculate_rsi(window['close'], 13).iloc[-1]
+        rsi21 = calculate_rsi(window['close'], 21).iloc[-1]
+        if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
+            continue
+        rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
+
+        k, d, j = calculate_kdj(window, length=5, ma1=8, ma2=8)
+        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
+            continue
+        kdj_trend = analyze_kdj_trend(k, d, j)
+
+        if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
+            continue
+
+        signals.append({
+            'timestamp': window.index[-1],
+            'rsi_trend': rsi_trend,
+            'kdj_trend': kdj_trend,
+            'close': window['close'].iloc[-1]
+        })
+
+    return signals
+
 # --- MAIN LOGIC ---
 
 def main():
@@ -133,39 +167,18 @@ def main():
             print("Not enough data")
             return
 
-        df = add_indicators(df)
-        trend = analyze_trend(df)
-        if not trend.get('price_between_mas'):
-            print("Price not between MAs, skipping alert.")
-            return
+        signals = backtest(df)
 
-        rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
-        rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
-        rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
-
-        if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
-            print("RSI values too close, skipping alert.")
-            return
-
-        rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
-
-        k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
-
-        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
-            print("KDJ values too close, skipping alert.")
-            return
-
-        kdj_trend = analyze_kdj_trend(k, d, j)
-
-        if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
-            print("No clear trend detected, skipping alert.")
-            return
-
-        msg = (f"<b>KuCoin {INTERVAL.upper()} Combined RSI & KDJ Alert ({dt})</b>\n"
-               f"EUR/USDT - RSI: {rsi_trend} | KDJ: {kdj_trend}")
-
-        send_telegram_message(msg)
-        print("Alert sent:", msg)
+        if signals:
+            msg_lines = [f"<b>KuCoin {INTERVAL.upper()} Backtest RSI & KDJ Signals for EUR/USDT ({dt})</b>"]
+            for s in signals:
+                ts = s['timestamp'].strftime('%Y-%m-%d %H:%M')
+                msg_lines.append(f"{ts} - Close: {s['close']:.6f} | RSI: {s['rsi_trend']} | KDJ: {s['kdj_trend']}")
+            msg = "\n".join(msg_lines)
+            send_telegram_message(msg)
+            print("Backtest signals sent.")
+        else:
+            print("No signals generated in backtest.")
 
     except Exception as e:
         print(f"Error: {e}")
