@@ -8,9 +8,9 @@ import math
 
 # --- CONFIGURATION ---
 
-SYMBOL = "EURUSD=X"  # Yahoo Finance ticker for EUR/USD forex pair
+SYMBOL = "EURUSD=X"  # Yahoo Finance ticker for EUR/USD
 INTERVAL = '15m'     # 15-minute candles
-LOOKBACK = 210       # Number of candles to fetch (about 52.5 hours)
+LOOKBACK = 210       # Number of candles to fetch (~52.5 hours)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -45,46 +45,10 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
     j = 3 * k - 2 * d
     return k, d, j
 
-# --- TREND LOGIC ---
-
-def analyze_trend(df):
-    cp = float(df['Close'].iloc[-1])
-    ma50 = float(df['MA50'].iloc[-1])
-    ema200 = float(df['EMA200'].iloc[-1])
-    ma200 = float(df['MA200'].iloc[-1])
-
-    low = min(ma50, ema200, ma200)
-    high = max(ma50, ema200, ma200)
-
-    results = {}
-    results['price_between_mas'] = low <= cp <= high
-    return results
-
-def analyze_rsi_trend(rsi8, rsi13, rsi21):
-    if rsi8 > rsi13 > rsi21:
-        return "Uptrend"
-    elif rsi8 < rsi13 < rsi21:
-        return "Downtrend"
-    else:
-        return "No clear RSI trend"
-
-def analyze_kdj_trend(k, d, j):
-    if len(k) < 2 or len(d) < 2 or len(j) < 2:
-        return "No clear KDJ trend"
-    k_prev, k_curr = k.iloc[-2], k.iloc[-1]
-    d_prev, d_curr = d.iloc[-2], d.iloc[-1]
-    j_prev, j_curr = j.iloc[-2], j.iloc[-1]
-
-    if k_prev < d_prev and k_curr > d_curr and j_curr > k_curr and j_curr > d_curr:
-        return "Bullish KDJ crossover"
-    elif k_prev > d_prev and k_curr < d_curr and j_curr < k_curr and j_curr < d_curr:
-        return "Bearish KDJ crossover"
-    else:
-        return "No clear KDJ trend"
-
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_yfinance(symbol, interval, lookback):
+    # Calculate days to cover lookback candles at 15m interval
     minutes_per_candle = 15
     total_minutes = lookback * minutes_per_candle
     days = max(1, math.ceil(total_minutes / (60 * 24)))
@@ -117,6 +81,41 @@ def send_telegram_message(message):
     resp = requests.post(url, data=payload)
     resp.raise_for_status()
 
+# --- TREND LOGIC ---
+
+def analyze_trend(df):
+    cp = float(df['Close'].iloc[-1])
+    ma50 = float(df['MA50'].iloc[-1])
+    ema200 = float(df['EMA200'].iloc[-1])
+    ma200 = float(df['MA200'].iloc[-1])
+
+    low = min(ma50, ema200, ma200)
+    high = max(ma50, ema200, ma200)
+
+    return low <= cp <= high
+
+def analyze_rsi_trend(rsi8, rsi13, rsi21):
+    if rsi8 > rsi13 > rsi21:
+        return "Uptrend"
+    elif rsi8 < rsi13 < rsi21:
+        return "Downtrend"
+    else:
+        return "No clear RSI trend"
+
+def analyze_kdj_trend(k, d, j):
+    if len(k) < 2 or len(d) < 2 or len(j) < 2:
+        return "No clear KDJ trend"
+    k_prev, k_curr = k.iloc[-2], k.iloc[-1]
+    d_prev, d_curr = d.iloc[-2], d.iloc[-1]
+    j_prev, j_curr = j.iloc[-2], j.iloc[-1]
+
+    if k_prev < d_prev and k_curr > d_curr and j_curr > k_curr and j_curr > d_curr:
+        return "Bullish KDJ crossover"
+    elif k_prev > d_prev and k_curr < d_curr and j_curr < k_curr and j_curr < d_curr:
+        return "Bearish KDJ crossover"
+    else:
+        return "No clear KDJ trend"
+
 # --- MAIN LOGIC ---
 
 def main():
@@ -128,13 +127,7 @@ def main():
             return
 
         df = add_indicators(df)
-        trend = analyze_trend(df)
-
-        price_between_mas = trend.get('price_between_mas')
-        if not isinstance(price_between_mas, bool):
-            price_between_mas = bool(price_between_mas)
-
-        if not price_between_mas:
+        if not analyze_trend(df):
             print("Price not between MAs, skipping alert.")
             return
 
@@ -149,9 +142,8 @@ def main():
         rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
 
         k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
-        k_last, d_last, j_last = k.iloc[-1], d.iloc[-1], j.iloc[-1]
 
-        if np.isclose(k_last, d_last) and np.isclose(d_last, j_last):
+        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
             print("KDJ values too close, skipping alert.")
             return
 
