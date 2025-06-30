@@ -16,7 +16,10 @@ COINS = [
 
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
-LOOKBACK = 210       # Number of candles to fetch (>= 200)
+LOOKBACK = 210       # Number of candles for indicator calculation
+
+# For backtest: 7 days = 14 candles (12h), plus LOOKBACK for indicators
+BACKTEST_CANDLES = LOOKBACK + 14
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -68,9 +71,7 @@ def analyze_trend(df):
     low = min(ma50, ema200, ma200)
     high = max(ma50, ema200, ma200)
 
-    results = {}
-    results['price_between_mas'] = low <= cp <= high
-    return results
+    return low <= cp <= high
 
 # --- DATA FETCHING ---
 
@@ -98,75 +99,101 @@ def send_telegram_message(message):
     resp = requests.post(url, data=payload)
     resp.raise_for_status()
 
-# --- MAIN LOGIC ---
+# --- BACKTESTING ---
+
+def backtest_strategy(df):
+    signals = []
+    returns = []
+
+    start_idx = LOOKBACK  # Start after enough candles for indicators
+    end_idx = len(df) - 1
+
+    for i in range(start_idx, end_idx):
+        sub_df = df.iloc[:i+1].copy()
+        sub_df = add_indicators(sub_df)
+
+        # Skip if MAs not ready
+        if sub_df[['MA50', 'MA200', 'EMA200']].isnull().any().any():
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        if not analyze_trend(sub_df):
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        rsi21 = calculate_rsi(sub_df['close'], 21).iloc[-1]
+        rsi13 = calculate_rsi(sub_df['close'], 13).iloc[-1]
+        rsi5 = calculate_rsi(sub_df['close'], 5).iloc[-1]
+
+        if np.isclose(rsi5, rsi13, atol=1) and np.isclose(rsi13, rsi21, atol=1):
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        if not (rsi5 > rsi13 > rsi21 or rsi5 < rsi13 < rsi21):
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        stoch_k, stoch_d = calculate_stochastic_rsi(sub_df, 13, 8, 5, 3)
+        if np.isclose(stoch_k.iloc[-1], stoch_d.iloc[-1], atol=1):
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        k, d, j = calculate_kdj(sub_df, 5, 8, 8)
+        if np.isclose(k.iloc[-1], d.iloc[-1], atol=1) and np.isclose(d.iloc[-1], j.iloc[-1], atol=1):
+            signals.append(0)
+            returns.append(0)
+            continue
+
+        # Signal = Buy (1)
+        signals.append(1)
+
+        # Calculate return from current close to next close
+        ret = (df['close'].iloc[i+1] - df['close'].iloc[i]) / df['close'].iloc[i]
+        returns.append(ret)
+
+    # Calculate cumulative return of trades (only on signal days)
+    trade_returns = [r for s, r in zip(signals, returns) if s == 1]
+    cumulative_return = np.prod([1 + r for r in trade_returns]) - 1 if trade_returns else 0
+
+    return {
+        'signals': signals,
+        'returns': returns,
+        'cumulative_return': cumulative_return
+    }
+
+# --- MAIN ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-    coins_meeting_all = []
-    trend_indications = {}
+    coins_results = {}
 
     for symbol in COINS:
         try:
-            df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
-            if len(df) < 200:
-                print(f"Not enough data for {symbol}")
+            df = fetch_ohlcv_ccxt(symbol, INTERVAL, BACKTEST_CANDLES)
+            if len(df) < BACKTEST_CANDLES:
+                print(f"Not enough data for backtest on {symbol}")
                 continue
 
-            df = add_indicators(df)
-            trend = analyze_trend(df)
-            if not trend.get('price_between_mas'):
-                continue  # skip if price not between MAs
-
-            # Calculate RSI values (21, 13, 5)
-            rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
-            rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
-            rsi5 = calculate_rsi(df['close'], 5).iloc[-1]
-
-            # RSI equality check with tolerance
-            if np.isclose(rsi5, rsi13, atol=1) and np.isclose(rsi13, rsi21, atol=1):
-                continue  # skip if RSI values are effectively equal
-
-            # Determine RSI trend
-            if rsi5 > rsi13 > rsi21:
-                rsi_trend = "Uptrend"
-            elif rsi5 < rsi13 < rsi21:
-                rsi_trend = "Downtrend"
-            else:
-                rsi_trend = "No clear RSI trend"
-
-            # Calculate Stochastic RSI (RSI length=13, stock length=8, smooth k=5, smooth d=3)
-            stoch_k, stoch_d = calculate_stochastic_rsi(df, rsi_length=13, stock_length=8, smooth_k=5, smooth_d=3)
-            stoch_k_last, stoch_d_last = stoch_k.iloc[-1], stoch_d.iloc[-1]
-
-            # Skip if Stochastic RSI K and D are effectively equal
-            if np.isclose(stoch_k_last, stoch_d_last, atol=1):
-                continue
-
-            # Calculate KDJ (length=5, ma1=8, ma2=8)
-            k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
-            k_last, d_last, j_last = k.iloc[-1], d.iloc[-1], j.iloc[-1]
-
-            # Skip if KDJ values are effectively equal
-            if np.isclose(k_last, d_last, atol=1) and np.isclose(d_last, j_last, atol=1):
-                continue
-
-            # If all conditions met, add to list
-            coins_meeting_all.append(symbol)
-            trend_indications[symbol] = rsi_trend
+            result = backtest_strategy(df)
+            coins_results[symbol] = result
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    # Send Telegram message
-    if coins_meeting_all:
-        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Combined Alert ({dt})</b>",
-                     "Coins satisfying all conditions (Price between MAs, RSI unequal, StochRSI unequal, KDJ unequal):\n"]
-        for coin in coins_meeting_all:
-            msg_lines.append(f"{coin} - RSI Trend: {trend_indications.get(coin, 'N/A')}")
-        msg = "\n".join(msg_lines)
-        send_telegram_message(msg)
+    # Prepare Telegram message
+    if coins_results:
+        msg_lines = [f"<b>KuCoin {INTERVAL.upper()} 7-Day Backtest ({dt})</b>", ""]
+        for coin, res in coins_results.items():
+            cum_ret_pct = res['cumulative_return'] * 100
+            msg_lines.append(f"{coin}: Cumulative Return: {cum_ret_pct:.2f}%")
+        send_telegram_message("\n".join(msg_lines))
     else:
-        send_telegram_message("No coins satisfy all conditions at this time.")
+        send_telegram_message("No coins had sufficient data for backtesting.")
 
 if __name__ == "__main__":
     main()
