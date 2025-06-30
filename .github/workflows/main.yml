@@ -1,10 +1,6 @@
 name: Kraken 8H Trend Alert
 
 on:
-  schedule:
-    - cron: '35 0 * * *'
-    - cron: '35 8 * * *'   
-    - cron: '35 16 * * *'
   workflow_dispatch:
 
 jobs:
