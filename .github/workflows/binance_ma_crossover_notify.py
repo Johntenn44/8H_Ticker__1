@@ -85,9 +85,9 @@ def analyze_kdj_trend(k, d, j):
 # --- DATA FETCHING ---
 
 def fetch_ohlcv_yfinance(symbol, interval, lookback):
-    # For intervals < 1d, yfinance requires 'period' parameter, not start/end
-    # Calculate period in days to cover enough data
-    total_minutes = lookback * 15  # 15 minutes per candle
+    # Calculate number of days to cover lookback candles at 15m interval
+    minutes_per_candle = 15
+    total_minutes = lookback * minutes_per_candle
     days = max(1, math.ceil(total_minutes / (60 * 24)))  # at least 1 day
 
     period_str = f"{days}d"
@@ -97,7 +97,7 @@ def fetch_ohlcv_yfinance(symbol, interval, lookback):
         period=period_str,
         interval=interval,
         progress=False,
-        auto_adjust=False  # Set True if you want adjusted prices
+        auto_adjust=False  # set True if you want adjusted prices
     )
 
     if df.empty:
