@@ -7,10 +7,33 @@ from datetime import datetime
 
 # --- CONFIGURATION ---
 
-COINS = ["USDT/EUR"]     # KuCoin symbol for USDT/EUR
+COINS = [
+    "XRP/USDT",
+    "XMR/USDT",
+    "GMX/USDT",
+    "LUNA/USDT",
+    "TRX/USDT",
+    "EIGEN/USDT",
+    "APE/USDT",
+    "WAVES/USDT",
+    "PLUME/USDT",
+    "SUSHI/USDT",
+    "DOGE/USDT",
+    "VIRTUAL/USDT",
+    "CAKE/USDT",
+    "GRASS/USDT",
+    "AAVE/USDT",
+    "SUI/USDT",
+    "ARB/USDT",
+    "XLM/USDT",
+    "MNT/USDT",
+    "LTC/USDT",
+    "NEAR/USDT",
+]
+
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '15m'
-LOOKBACK = 210           # 210 candles * 15m = 52.5 hours (~2.19 days)
+INTERVAL = '12h'      # 12-hour candles
+LOOKBACK = 210       # Number of candles to fetch (>= 200)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -56,7 +79,9 @@ def analyze_trend(df):
     low = min(ma50, ema200, ma200)
     high = max(ma50, ema200, ma200)
 
-    return {'price_between_mas': low <= cp <= high}
+    results = {}
+    results['price_between_mas'] = low <= cp <= high
+    return results
 
 def analyze_rsi_trend(rsi8, rsi13, rsi21):
     if rsi8 > rsi13 > rsi21:
@@ -69,42 +94,32 @@ def analyze_rsi_trend(rsi8, rsi13, rsi21):
 def analyze_kdj_trend(k, d, j):
     if len(k) < 2 or len(d) < 2 or len(j) < 2:
         return "No clear KDJ trend"
+    # Previous and current values
     k_prev, k_curr = k.iloc[-2], k.iloc[-1]
     d_prev, d_curr = d.iloc[-2], d.iloc[-1]
     j_prev, j_curr = j.iloc[-2], j.iloc[-1]
 
+    # Bullish crossover: K crosses above D and J confirms (J > K and D)
     if k_prev < d_prev and k_curr > d_curr and j_curr > k_curr and j_curr > d_curr:
         return "Bullish KDJ crossover"
+    # Bearish crossover: K crosses below D and J confirms (J < K and D)
     elif k_prev > d_prev and k_curr < d_curr and j_curr < k_curr and j_curr < d_curr:
         return "Bearish KDJ crossover"
     else:
         return "No clear KDJ trend"
 
-# --- DATA FETCHING AND CONVERSION ---
+# --- DATA FETCHING ---
 
-def fetch_ohlcv_and_convert(symbol, timeframe, limit):
-    exchange_class = getattr(ccxt, EXCHANGE_ID)
-    exchange = exchange_class()
+def fetch_ohlcv_ccxt(symbol, timeframe, limit):
+    exchange = getattr(ccxt, EXCHANGE_ID)()
     exchange.load_markets()
-
-    if symbol not in exchange.symbols:
-        raise ValueError(f"Symbol {symbol} not available on {EXCHANGE_ID}")
-
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df = pd.DataFrame(
+        ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+    )
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    df = df.astype(float)
-
-    # Convert USDT/EUR to EUR/USDT by taking reciprocal of prices
-    df['open'] = 1 / df['open']
-    df['high'] = 1 / df['low']
-    df['low'] = 1 / df['high']
-    df['close'] = 1 / df['close']
-
-    # Convert volume approx to EUR (base currency of EUR/USDT)
-    df['volume'] = df['volume'] * df['close']
-
+    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
     return df
 
 # --- TELEGRAM NOTIFICATION ---
@@ -119,69 +134,64 @@ def send_telegram_message(message):
     resp = requests.post(url, data=payload)
     resp.raise_for_status()
 
-# --- BACKTEST FUNCTION ---
-
-def backtest(df):
-    signals = []
-    # Start at 200 to have enough data for indicators
-    for i in range(200, len(df)):
-        window = df.iloc[:i+1].copy()
-        window = add_indicators(window)
-
-        trend = analyze_trend(window)
-        if not trend.get('price_between_mas'):
-            continue
-
-        rsi8 = calculate_rsi(window['close'], 8).iloc[-1]
-        rsi13 = calculate_rsi(window['close'], 13).iloc[-1]
-        rsi21 = calculate_rsi(window['close'], 21).iloc[-1]
-        if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
-            continue
-        rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
-
-        k, d, j = calculate_kdj(window, length=5, ma1=8, ma2=8)
-        if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
-            continue
-        kdj_trend = analyze_kdj_trend(k, d, j)
-
-        if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
-            continue
-
-        signals.append({
-            'timestamp': window.index[-1],
-            'rsi_trend': rsi_trend,
-            'kdj_trend': kdj_trend,
-            'close': window['close'].iloc[-1]
-        })
-
-    return signals
-
 # --- MAIN LOGIC ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+    coins_meeting_all = []
+    trend_indications = {}
 
-    try:
-        df = fetch_ohlcv_and_convert("USDT/EUR", INTERVAL, LOOKBACK)
-        if len(df) < 200:
-            print("Not enough data")
-            return
+    for symbol in COINS:
+        try:
+            df = fetch_ohlcv_ccxt(symbol, INTERVAL, LOOKBACK)
+            if len(df) < 200:
+                print(f"Not enough data for {symbol}")
+                continue
 
-        signals = backtest(df)
+            df = add_indicators(df)
+            trend = analyze_trend(df)
+            if not trend.get('price_between_mas'):
+                continue  # skip if price not between MAs
 
-        if signals:
-            msg_lines = [f"<b>KuCoin {INTERVAL.upper()} Backtest RSI & KDJ Signals for EUR/USDT ({dt})</b>"]
-            for s in signals:
-                ts = s['timestamp'].strftime('%Y-%m-%d %H:%M')
-                msg_lines.append(f"{ts} - Close: {s['close']:.6f} | RSI: {s['rsi_trend']} | KDJ: {s['kdj_trend']}")
-            msg = "\n".join(msg_lines)
-            send_telegram_message(msg)
-            print("Backtest signals sent.")
-        else:
-            print("No signals generated in backtest.")
+            # Calculate RSI values
+            rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
+            rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
+            rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
 
-    except Exception as e:
-        print(f"Error: {e}")
+            # RSI equality check (skip if all equal)
+            if np.isclose(rsi8, rsi13) and np.isclose(rsi13, rsi21):
+                continue
+
+            rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
+
+            # Calculate KDJ values
+            k, d, j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+
+            # KDJ equality check (skip if all equal)
+            if np.isclose(k.iloc[-1], d.iloc[-1]) and np.isclose(d.iloc[-1], j.iloc[-1]):
+                continue
+
+            kdj_trend = analyze_kdj_trend(k, d, j)
+
+            # Skip if no clear trend in both RSI and KDJ
+            if rsi_trend == "No clear RSI trend" and kdj_trend == "No clear KDJ trend":
+                continue
+
+            coins_meeting_all.append(symbol)
+            trend_indications[symbol] = f"RSI: {rsi_trend} | KDJ: {kdj_trend}"
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+
+    if coins_meeting_all:
+        msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Combined RSI & KDJ Alert ({dt})</b>",
+                     "Coins satisfying conditions:\n"]
+        for coin in coins_meeting_all:
+            msg_lines.append(f"{coin} - {trend_indications.get(coin, 'N/A')}")
+        msg = "\n".join(msg_lines)
+        send_telegram_message(msg)
+    else:
+        send_telegram_message("No coins satisfy the RSI and KDJ trend conditions at this time.")
 
 if __name__ == "__main__":
     main()
