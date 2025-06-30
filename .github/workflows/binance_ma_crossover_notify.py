@@ -16,7 +16,7 @@ COINS = [
 
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '12h'      # 12-hour candles
-LOOKBACK = 500        # Fetch enough data for indicator calculation and 10 days backtest
+LOOKBACK = 500        # Enough data for indicators + backtest
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -65,48 +65,53 @@ def backtest_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3
     position = 0  # 0 = no position, 1 = long
     entry_price = 0.0
     returns = []
+    trades = []  # To store (entry_date, exit_date, return)
 
-    # We'll backtest only on last 10 days of data (filtered by timestamp)
-    # 10 days * 2 candles per day (12h interval) = 20 candles approx
     backtest_start = df.index[-1] - timedelta(days=10)
     df_bt = df.loc[df.index >= backtest_start]
 
     k_bt = k.loc[df_bt.index]
     d_bt = d.loc[df_bt.index]
 
+    entry_date = None
+
     for i in range(1, len(df_bt)):
-        # Skip if any NaN in indicators
         if pd.isna(k_bt.iloc[i-1]) or pd.isna(d_bt.iloc[i-1]) or pd.isna(k_bt.iloc[i]) or pd.isna(d_bt.iloc[i]):
             returns.append(0)
             continue
 
-        # Entry condition: %K crosses above %D and %K < 80
+        # Entry condition
         if position == 0 and k_bt.iloc[i-1] < d_bt.iloc[i-1] and k_bt.iloc[i] > d_bt.iloc[i] and k_bt.iloc[i] < 80:
             position = 1
             entry_price = df_bt['close'].iloc[i]
-            returns.append(0)  # no return on entry candle
+            entry_date = df_bt.index[i]
+            returns.append(0)
 
-        # Exit condition: %K crosses below %D and %K > 20
+        # Exit condition
         elif position == 1 and k_bt.iloc[i-1] > d_bt.iloc[i-1] and k_bt.iloc[i] < d_bt.iloc[i] and k_bt.iloc[i] > 20:
             exit_price = df_bt['close'].iloc[i]
+            exit_date = df_bt.index[i]
             ret = (exit_price - entry_price) / entry_price
             returns.append(ret)
+            trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
             position = 0
             entry_price = 0.0
+            entry_date = None
 
         else:
-            returns.append(0)  # no trade or holding position without exit
+            returns.append(0)
 
-    # If still holding position at end, close at last price
+    # Close any open position at last candle
     if position == 1:
         exit_price = df_bt['close'].iloc[-1]
+        exit_date = df_bt.index[-1]
         ret = (exit_price - entry_price) / entry_price
-        returns[-1] += ret  # add return to last candle
+        returns[-1] += ret
+        trades.append((entry_date.strftime('%Y-%m-%d %H:%M'), exit_date.strftime('%Y-%m-%d %H:%M'), ret))
 
-    # Calculate cumulative return
     cumulative_return = np.prod([1 + r for r in returns]) - 1
 
-    return cumulative_return, returns, df_bt.index[1:]  # returns aligned with index from second candle
+    return cumulative_return, trades
 
 # --- TELEGRAM NOTIFICATION ---
 
@@ -133,18 +138,24 @@ def main():
                 print(f"Not enough data for {symbol}")
                 continue
 
-            cum_ret, returns, timestamps = backtest_stoch_rsi(df)
-            results[symbol] = cum_ret
+            cum_ret, trades = backtest_stoch_rsi(df)
+            results[symbol] = (cum_ret, trades)
 
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
 
-    # Prepare message with backtest results
     if results:
         msg_lines = [f"<b>Kucoin {INTERVAL.upper()} Stochastic RSI 10-Day Backtest ({dt})</b>",
-                     "Cumulative returns from backtest:\n"]
-        for coin, ret in sorted(results.items(), key=lambda x: x[1], reverse=True):
-            msg_lines.append(f"{coin}: {ret*100:.2f}%")
+                     "Cumulative returns and trade dates:\n"]
+        for coin, (ret, trades) in sorted(results.items(), key=lambda x: x[1][0], reverse=True):
+            msg_lines.append(f"{coin}: {ret*100:.2f}% cumulative return")
+            if trades:
+                for entry_date, exit_date, trade_ret in trades:
+                    msg_lines.append(f"  Entry: {entry_date}  Exit: {exit_date}  Return: {trade_ret*100:.2f}%")
+            else:
+                msg_lines.append("  No trades executed.")
+            msg_lines.append("")  # blank line between coins
+
         msg = "\n".join(msg_lines)
         send_telegram_message(msg)
     else:
